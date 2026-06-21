@@ -14,10 +14,13 @@ YouTube 學習筆記助手
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
 from collections import Counter
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_TMP_DIR = os.path.join(_SCRIPT_DIR, "tmp")
+os.makedirs(_TMP_DIR, exist_ok=True)
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -101,6 +104,17 @@ def resolve_channel(query: str) -> tuple[str, str]:
     query = query.strip()
     ydl_opts = {"quiet": True, "skip_download": True, "no_warnings": True, "extract_flat": True}
 
+    # 若使用者貼的是單支影片網址，從中取出頻道 URL
+    if is_url(query) and extract_video_id(query) is not None:
+        with YoutubeDL({"quiet": True, "skip_download": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(query, download=False)
+        channel_url = info.get("channel_url") or info.get("uploader_url")
+        channel_name = info.get("channel") or info.get("uploader") or query
+        if not channel_url:
+            raise ValueError(f"無法從影片網址取得頻道資訊：{query}")
+        base = channel_url.rstrip("/")
+        return base, channel_name
+
     if is_channel_url(query):
         base = query.split("?")[0].rstrip("/")
         for suffix in CHANNEL_TAB_SUFFIXES:
@@ -164,6 +178,54 @@ def list_channel_videos(query: str, max_videos: int | None = None,
                 "title": entry.get("title", entry["id"]),
                 "url": f"https://www.youtube.com/watch?v={entry['id']}",
                 "type": CONTENT_TYPE_LABELS.get(ctype, ctype),
+            })
+    return channel_name, videos
+
+
+def list_channel_videos_since(query: str, since_date: str,
+                              content_types: tuple[str, ...] = ("videos",)) -> tuple[str, list[dict]]:
+    """回傳 since_date（含）之後發布的影片，每個影片附帶 upload_date 欄位。
+    since_date 格式：YYYY-MM-DD。
+    注意：yt-dlp dateafter 在 extract_info 模式下不過濾 entries，
+    因此改用 extract_flat=False 取得每部影片的 upload_date，再手動比對。"""
+    channel_base_url, channel_name = resolve_channel(query)
+
+    # 比對用的無破折號格式（YYYYMMDD），與 yt-dlp upload_date 欄位格式一致
+    since_compact = since_date.replace("-", "")
+
+    videos = []
+    seen_ids = set()
+    for ctype in content_types:
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "no_warnings": True,
+            "extract_flat": False,  # 需要完整 metadata 才有 upload_date
+            "ignoreerrors": True,   # Premiere/直播等特殊影片抓取失敗時繼續處理
+            "playlistend": 50,
+        }
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"{channel_base_url}/{ctype}", download=False)
+        except Exception:
+            continue
+
+        for entry in (info.get("entries") or []):
+            if not entry or not entry.get("id") or entry["id"] in seen_ids:
+                continue
+            seen_ids.add(entry["id"])
+            raw_date = entry.get("upload_date") or ""  # 格式 YYYYMMDD
+            # 手動過濾：只保留 since_date 當天及之後
+            if raw_date < since_compact:
+                continue
+            upload_date = (f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+                           if len(raw_date) == 8 else "")
+            videos.append({
+                "id": entry["id"],
+                "title": entry.get("title", entry["id"]),
+                "url": f"https://www.youtube.com/watch?v={entry['id']}",
+                "type": CONTENT_TYPE_LABELS.get(ctype, ctype),
+                "upload_date": upload_date,
             })
     return channel_name, videos
 
@@ -271,7 +333,7 @@ def transcribe_url_with_whisper(url: str, model_size: str = "small", log=print,
         "quiet": True,
         "no_warnings": True,
         "format": "bestaudio/best",
-        "outtmpl": os.path.join(tempfile.gettempdir(), "yt_notes_audio_%(id)s.%(ext)s"),
+        "outtmpl": os.path.join(_TMP_DIR, "yt_notes_audio_%(id)s.%(ext)s"),
         "overwrites": True,
     }
     audio_path = None
@@ -282,24 +344,39 @@ def transcribe_url_with_whisper(url: str, model_size: str = "small", log=print,
             audio_path = downloads[0]["filepath"] if downloads else ydl.prepare_filename(info)
             title = info.get("title") or info.get("id") or url
 
-        log("載入 Whisper 模型並進行語音辨識中（依影片長度，可能需要幾分鐘）...")
+        log("載入音訊並切割成小段以節省記憶體...")
+        from faster_whisper.audio import decode_audio
+        SAMPLE_RATE = 16000
+        CHUNK_MINUTES = 10
+        audio = decode_audio(audio_path)
+        chunk_samples = CHUNK_MINUTES * 60 * SAMPLE_RATE
+        chunks = [(audio[s: s + chunk_samples], i * CHUNK_MINUTES * 60.0)
+                  for i, s in enumerate(range(0, len(audio), chunk_samples))] or [(audio, 0.0)]
+
+        log(f"共 {len(chunks)} 段，載入 Whisper 模型中...")
         model = _get_whisper_model(model_size)
-        segments, transcribe_info = model.transcribe(
-            audio_path, beam_size=5, vad_filter=True,
-            initial_prompt="以下是繁體中文的句子",
-        )
-        log(f"辨識語言：{transcribe_info.language}（信心度 {transcribe_info.language_probability:.0%}）")
 
         result = []
-        for seg in segments:
-            if control:
-                control.wait_if_paused()
-                if control.is_stopped():
-                    log(f"使用者已停止，已辨識到 [{format_timestamp(seg.start)}]，中斷後續辨識。")
-                    break
-            text = seg.text.strip()
-            log(f"[{format_timestamp(seg.start)} -> {format_timestamp(seg.end)}] {text}")
-            result.append({"text": text, "start": seg.start, "duration": seg.end - seg.start})
+        for idx, (chunk, offset) in enumerate(chunks, 1):
+            log(f"辨識第 {idx}/{len(chunks)} 段（起始 {format_timestamp(offset)}）...")
+            seg_iter, transcribe_info = model.transcribe(
+                chunk, beam_size=5, vad_filter=True,
+                initial_prompt="以下是繁體中文的句子",
+                chunk_length=30,
+            )
+            if idx == 1:
+                log(f"辨識語言：{transcribe_info.language}（信心度 {transcribe_info.language_probability:.0%}）")
+            for seg in seg_iter:
+                if control:
+                    control.wait_if_paused()
+                    if control.is_stopped():
+                        abs_ts = format_timestamp(seg.start + offset)
+                        log(f"使用者已停止，已辨識到 [{abs_ts}]，中斷後續辨識。")
+                        return title, result
+                text = seg.text.strip()
+                abs_start = seg.start + offset
+                log(f"[{format_timestamp(abs_start)} -> {format_timestamp(seg.end + offset)}] {text}")
+                result.append({"text": text, "start": abs_start, "duration": seg.end - seg.start})
         return title, result
     finally:
         if audio_path and os.path.exists(audio_path):
