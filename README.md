@@ -25,6 +25,15 @@
 
 收到新影片通知時，訊息會附上「產生逐字稿」快速回覆按鈕，點一下就等同輸入 `轉錄 <video_id>`。
 
+### 按鈕（兩種，可以跟手動輸入並存）
+
+- **Quick Reply**：大部分回覆訊息下方都會附上「監控／取消監控／清單／查詢／轉錄」5 個按鈕，貼在單一則訊息上，使用者再傳下一句話就會消失。點按鈕等同直接打出該指令文字，純文字輸入完全不受影響。
+- **Rich Menu**（常駐選單，選用）：跟 Quick Reply 不同，Rich Menu 釘在整個聊天室下方，不管什麼時候打開聊天室都看得到。設定方式見下方「Rich Menu 設定」。
+
+點「監控」「取消監控」「轉錄」這幾個需要參數的按鈕後，Bot 會先回覆提示訊息（例如「請輸入要監控的頻道網址或名稱：」），並記住這個使用者正在等哪個指令的輸入；下一句話不管打什麼，都會直接當成該指令的參數處理，不需要重新打一次指令文字。
+
+另外，即使完全沒打任何指令、也沒有正在等待輸入，只要訊息內容是 YouTube 頻道網址（`youtube.com/@...`、`/channel/...` 等），Bot 會自動判斷並當成監控請求處理。
+
 ---
 
 ## 架構
@@ -32,7 +41,8 @@
 - **`video_text/line_bot/app.py`** — Flask + [line-bot-sdk](https://github.com/line/line-bot-sdk-python) v3 寫的 webhook server，是實際部署的 LINE Bot 本體。
   - `POST /callback`：LINE 平台的 webhook 進入點。
   - `POST /check_all?secret=<CRON_SECRET>`：給外部排程服務呼叫，定時檢查所有使用者監控的頻道並主動推播。
-  - 監控清單存在 `video_text/line_bot/watch_data.json`（每個 LINE 使用者各自一份 channel 清單）。
+  - 監控清單預設存在 Upstash Redis（設定 `REDIS_URL` 才會啟用，見下方「監控清單持久化」），每個
+    LINE 使用者各自一份 channel 清單；沒設定 `REDIS_URL` 時退回本機 `watch_data.json`，方便本機開發。
   - 抓字幕/轉錄等耗時工作丟到背景執行緒處理，完成後用 `push_message` 把結果推回去，避免 LINE webhook 逾時。
 - **`video_text/yt_notes_assistant.py`** — 核心邏輯（被 `app.py` import），也可以單獨當 CLI 工具跑：解析頻道/影片、抓字幕、Whisper 備援轉錄、jieba 關鍵字與重點摘要、輸出 Markdown 筆記。
 - **`video_text/yt_notes_gui.py`** — 同一套核心邏輯的桌面版 tkinter GUI，可勾選頻道影片清單批次產生筆記、匯出 Excel。
@@ -89,6 +99,29 @@ Render 上沒接 Redis 的話，監控清單還是不保證永久保存。
 
 ---
 
+## Rich Menu 設定（選用）
+
+`video_text/line_bot/setup_rich_menu.py` 是一支**一次性腳本**，用來建立常駐在聊天室下方的
+Rich Menu（5 個按鈕：監控／取消監控／清單／查詢／轉錄）。只需要在自己電腦上執行一次，不用
+跟著 Render 部署：
+
+```bash
+cd video_text/line_bot
+pip install pillow requests
+export LINE_CHANNEL_ACCESS_TOKEN=...
+python setup_rich_menu.py
+```
+
+腳本會自動找電腦上的中文字型畫按鈕圖片（Windows 預設找微軟正黑體），呼叫 LINE API 建立、上傳、
+並設成所有使用者的預設選單；之後想換按鈕文字或版面，改檔案內容重新執行一次即可，舊選單會自動
+清掉，不會在帳號裡越疊越多。找不到中文字型的話可以用參數指定字型檔路徑：
+
+```bash
+python setup_rich_menu.py "C:\Windows\Fonts\msjh.ttc"
+```
+
+---
+
 ## 本機開發
 
 ```bash
@@ -97,6 +130,7 @@ pip install -r requirements.txt
 export LINE_CHANNEL_ACCESS_TOKEN=...
 export LINE_CHANNEL_SECRET=...
 export CRON_SECRET=...
+export REDIS_URL=...   # 選用，沒設定會用本機 watch_data.json
 python app.py
 ```
 
