@@ -30,7 +30,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from yt_notes_assistant import (  # noqa: E402
-    is_url, extract_video_id, resolve_video,
+    is_url, extract_video_id, resolve_video, resolve_channel,
     list_channel_videos_since, process_video, process_external_url,
 )
 
@@ -103,11 +103,17 @@ def push_new_video_notice(user_id: str, channel_name: str, video: dict):
 # ---------- 指令處理（耗時工作丟到背景執行緒，用 push 回覆）----------
 
 def handle_watch(user_id: str, query: str):
+    try:
+        _, channel_name = resolve_channel(query)
+    except Exception as e:
+        push_text(user_id, f"找不到頻道「{query}」：{e}\n請確認頻道網址或名稱是否正確。")
+        return
+
     data = load_data()
     record = get_user_record(data, user_id)
     record["channels"][query] = date.today().isoformat()
     save_data(data)
-    push_text(user_id, f"已加入監控：{query}\n（從今天開始算起的新影片才會通知）")
+    push_text(user_id, f"已加入監控：{channel_name}\n（從今天開始算起的新影片才會通知）")
 
 
 def handle_unwatch(user_id: str, query: str):
