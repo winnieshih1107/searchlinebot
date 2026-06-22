@@ -61,6 +61,13 @@ startCommand: gunicorn --chdir video_text/line_bot --timeout 120 app:app
    ```
    POST https://<你的服務網址>/check_all?secret=<CRON_SECRET>
    ```
+5. **再加一個 keep-alive 排程**：Render 免費方案閒置 15 分鐘會自動休眠，下次請求進來要「冷啟動」
+   （重新載入 Python、jieba 字典、faster-whisper 等套件），實測冷啟動超過 30 秒，常常會讓
+   LINE 的 reply token 在 Bot 處理完之前就過期，使用者就會看到「處理中」後完全沒反應。
+   在 cron-job.org 再排一個排程，每 10 分鐘打一次健康檢查端點，讓服務不會閒置太久進入休眠：
+   ```
+   GET https://<你的服務網址>/
+   ```
 
 > ⚠️ Render 免費方案的本機磁碟在重新部署或長時間休眠重啟後可能會被清空，監控清單（`watch_data.json`）因此不保證永久保存。若需要長期保存，建議改存到外部資料庫（例如 Render 自家的免費 PostgreSQL）。
 
