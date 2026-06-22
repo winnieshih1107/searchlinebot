@@ -6,3 +6,4 @@ youtube-transcript-api>=0.6.2
 faster-whisper>=1.0.0
 jieba>=0.42.1
 openpyxl>=3.1
+redis>=5.0

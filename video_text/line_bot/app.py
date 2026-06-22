@@ -8,9 +8,10 @@ LINE 指令：
   查詢                    -> 檢查所有監控頻道是否有新影片
   轉錄 <影片網址或ID>      -> 抓字幕/轉逐字稿，整理成筆記回傳
 
-注意：Render 免費方案的本機磁碟在重新部署或長時間休眠重啟後可能會被清空，
-監控清單因此不保證永久保存；若需要長期保存，建議改存到外部資料庫
-（例如 Render 自家的免費 PostgreSQL）。
+監控清單存在 Upstash Redis（外部、免費、不會過期），不受 Render 免費方案
+「重新部署/休眠重啟會清空本機磁碟」的限制；本機開發沒設定 REDIS_URL 時，
+會自動退回用本機 watch_data.json 檔案（單純方便本機測試，部署到 Render 時
+請務必設定 REDIS_URL）。
 """
 
 import json
@@ -38,7 +39,6 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 CRON_SECRET = os.environ.get("CRON_SECRET")  # 用來保護 /check_all，避免外部任意呼叫
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "watch_data.json")
 LINE_TEXT_LIMIT = 4500  # LINE 單則訊息上限約 5000 字，留一點緩衝
 
 # 等待使用者回答頻道網址/名稱的對話狀態：user_id -> "watch" | "unwatch" | "transcribe"。
@@ -46,35 +46,93 @@ LINE_TEXT_LIMIT = 4500  # LINE 單則訊息上限約 5000 字，留一點緩衝
 # 重新部署或重啟會清空，使用者只需要重新點一次按鈕即可，影響很小）。
 pending_action: dict[str, str] = {}
 
-# 保護 watch_data.json 的讀寫：每個指令都在背景執行緒處理，若連續快速傳多個監控請求，
-# 兩個執行緒可能幾乎同時「讀檔→修改→存檔」，較晚存檔的會用舊資料整批覆蓋掉，
-# 導致前面加入的頻道被蓋掉、清單只剩最後一筆。用鎖把讀寫過程串行化。
-data_lock = threading.Lock()
-
 app = Flask(__name__)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
 
 # ---------- 監控清單儲存 ----------
+#
+# 兩種後端，介面統一是這四個函式：
+#   get_watched_channels(user_id) -> {channel_query: since_date}
+#   add_watched_channel(user_id, channel_query, since_date)        # 新增或更新 since_date
+#   remove_watched_channel(user_id, channel_query) -> bool          # 回傳原本是否存在
+#   get_all_watched_channels() -> {user_id: {channel_query: since_date}}
+#
+# 有設定 REDIS_URL 時用 Upstash Redis（外部、免費額度不過期，不受 Render 重新部署/
+# 休眠重啟清空本機磁碟的影響）；每個 Redis 指令本身就是原子操作，不需要額外上鎖。
+# 沒有設定時退回本機 JSON 檔，方便本機開發測試（但部署到 Render 沒接 Redis 的話，
+# 監控清單還是會在重新部署或長時間休眠後消失）。
 
-def load_data() -> dict:
-    if not os.path.exists(DATA_PATH):
-        return {}
-    try:
-        with open(DATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+REDIS_URL = os.environ.get("REDIS_URL")
 
+if REDIS_URL:
+    import redis
 
-def save_data(data: dict):
-    with open(DATA_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _redis = redis.from_url(REDIS_URL, decode_responses=True)
+    _USERS_SET_KEY = "watch:users"
 
+    def _channels_key(user_id: str) -> str:
+        return f"watch:{user_id}:channels"
 
-def get_user_record(data: dict, user_id: str) -> dict:
-    return data.setdefault(user_id, {"channels": {}})
+    def get_watched_channels(user_id: str) -> dict:
+        return _redis.hgetall(_channels_key(user_id))
+
+    def add_watched_channel(user_id: str, channel_query: str, since_date: str):
+        _redis.hset(_channels_key(user_id), channel_query, since_date)
+        _redis.sadd(_USERS_SET_KEY, user_id)
+
+    def remove_watched_channel(user_id: str, channel_query: str) -> bool:
+        return _redis.hdel(_channels_key(user_id), channel_query) > 0
+
+    def get_all_watched_channels() -> dict:
+        user_ids = _redis.smembers(_USERS_SET_KEY)
+        return {uid: _redis.hgetall(_channels_key(uid)) for uid in user_ids}
+
+else:
+    DATA_PATH = os.path.join(os.path.dirname(__file__), "watch_data.json")
+    # 保護 watch_data.json 的讀寫：每個指令都在背景執行緒處理，若連續快速傳多個監控請求，
+    # 兩個執行緒可能幾乎同時「讀檔→修改→存檔」，較晚存檔的會用舊資料整批覆蓋掉，
+    # 導致前面加入的頻道被蓋掉、清單只剩最後一筆。用鎖把讀寫過程串行化。
+    _data_lock = threading.Lock()
+
+    def _load_json() -> dict:
+        if not os.path.exists(DATA_PATH):
+            return {}
+        try:
+            with open(DATA_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_json(data: dict):
+        with open(DATA_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def get_watched_channels(user_id: str) -> dict:
+        with _data_lock:
+            data = _load_json()
+            return dict(data.get(user_id, {}).get("channels", {}))
+
+    def add_watched_channel(user_id: str, channel_query: str, since_date: str):
+        with _data_lock:
+            data = _load_json()
+            data.setdefault(user_id, {"channels": {}})["channels"][channel_query] = since_date
+            _save_json(data)
+
+    def remove_watched_channel(user_id: str, channel_query: str) -> bool:
+        with _data_lock:
+            data = _load_json()
+            record = data.setdefault(user_id, {"channels": {}})
+            removed = record["channels"].pop(channel_query, None) is not None
+            if removed:
+                _save_json(data)
+            return removed
+
+    def get_all_watched_channels() -> dict:
+        with _data_lock:
+            data = _load_json()
+            return {uid: dict(rec.get("channels", {})) for uid, rec in data.items()}
 
 
 # ---------- LINE 訊息輔助 ----------
@@ -132,31 +190,19 @@ def handle_watch(user_id: str, query: str):
         push_text(user_id, f"找不到頻道「{query}」：{e}\n請確認頻道網址或名稱是否正確。")
         return
 
-    with data_lock:
-        data = load_data()
-        record = get_user_record(data, user_id)
-        record["channels"][query] = date.today().isoformat()
-        save_data(data)
+    add_watched_channel(user_id, query, date.today().isoformat())
     push_text(user_id, f"已加入監控：{channel_name}\n（從今天開始算起的新影片才會通知）")
 
 
 def handle_unwatch(user_id: str, query: str):
-    with data_lock:
-        data = load_data()
-        record = get_user_record(data, user_id)
-        removed = record["channels"].pop(query, None) is not None
-        if removed:
-            save_data(data)
-    if removed:
+    if remove_watched_channel(user_id, query):
         push_text(user_id, f"已取消監控：{query}")
     else:
         push_text(user_id, f"監控清單裡沒有找到：{query}")
 
 
 def handle_list(user_id: str):
-    with data_lock:
-        data = load_data()
-        channels = dict(get_user_record(data, user_id)["channels"])
+    channels = get_watched_channels(user_id)
     if not channels:
         push_text(user_id, "目前沒有監控任何頻道，輸入「監控 <頻道網址或名稱>」開始監控。")
         return
@@ -167,16 +213,13 @@ def handle_list(user_id: str):
 
 
 def handle_check(user_id: str):
-    with data_lock:
-        data = load_data()
-        channels_snapshot = dict(get_user_record(data, user_id)["channels"])
+    channels_snapshot = get_watched_channels(user_id)
     if not channels_snapshot:
         push_text(user_id, "目前沒有監控任何頻道，輸入「監控 <頻道網址或名稱>」開始監控。")
         return
 
     today = date.today().isoformat()
     any_new = False
-    checked = {}
     for channel_query, since_date in channels_snapshot.items():
         try:
             channel_name, videos = list_channel_videos_since(channel_query, since_date)
@@ -188,13 +231,7 @@ def handle_check(user_id: str):
             any_new = True
             for v in videos:
                 push_new_video_notice(user_id, channel_name, v)
-        checked[channel_query] = today
-
-    if checked:
-        with data_lock:
-            data = load_data()
-            get_user_record(data, user_id)["channels"].update(checked)
-            save_data(data)
+        add_watched_channel(user_id, channel_query, today)
 
     if not any_new:
         push_text(user_id, "目前監控的頻道都沒有新影片。")
@@ -202,15 +239,9 @@ def handle_check(user_id: str):
 
 def check_all_users():
     """供排程（cron）呼叫：檢查所有使用者監控的頻道，主動推播有新影片的通知（含「產生逐字稿」按鈕）。
-    沒有新影片時不主動打擾使用者。每個使用者各自查完才上鎖存檔一次，
-    不會因為整個流程很久而一直擋住其他使用者同時操作監控清單。"""
-    with data_lock:
-        data = load_data()
-        snapshot = {uid: dict(rec.get("channels", {})) for uid, rec in data.items()}
-
+    沒有新影片時不主動打擾使用者。"""
     today = date.today().isoformat()
-    for user_id, channels in snapshot.items():
-        checked = {}
+    for user_id, channels in get_all_watched_channels().items():
         for channel_query, since_date in channels.items():
             try:
                 channel_name, videos = list_channel_videos_since(channel_query, since_date)
@@ -219,13 +250,7 @@ def check_all_users():
                 continue
             for v in videos:
                 push_new_video_notice(user_id, channel_name, v)
-            checked[channel_query] = today
-
-        if checked:
-            with data_lock:
-                data = load_data()
-                get_user_record(data, user_id)["channels"].update(checked)
-                save_data(data)
+            add_watched_channel(user_id, channel_query, today)
 
 
 HELP_TEXT = (
@@ -272,18 +297,29 @@ def handle_transcribe(user_id: str, query: str):
         push_text(user_id, f"處理失敗：{e}")
 
 
+def run_safely(func, *args):
+    """背景執行緒的進入點：捕捉任何沒被各 handler 自己處理掉的例外
+    （例如 Redis 連線問題），回報錯誤給使用者，而不是讓執行緒悄悄死掉、
+    使用者只看到「處理中」之後完全沒有下文。"""
+    user_id = args[0]
+    try:
+        func(*args)
+    except Exception as e:
+        push_text(user_id, f"處理時發生錯誤：{e}")
+
+
 def dispatch(user_id: str, text: str, reply_token: str):
     text = text.strip()
 
     if text in ("查詢", "check"):
         pending_action.pop(user_id, None)
         reply_text(reply_token, "好，查詢中...")
-        threading.Thread(target=handle_check, args=(user_id,), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_check, user_id,), daemon=True).start()
         return
     if text in ("清單", "list"):
         pending_action.pop(user_id, None)
         reply_text(reply_token, "查詢中...")
-        threading.Thread(target=handle_list, args=(user_id,), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_list, user_id,), daemon=True).start()
         return
     if text.startswith("監控"):
         query = text[len("監控"):].strip()
@@ -293,7 +329,7 @@ def dispatch(user_id: str, text: str, reply_token: str):
             return
         pending_action.pop(user_id, None)
         reply_text(reply_token, "處理中...")
-        threading.Thread(target=handle_watch, args=(user_id, query), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_watch, user_id, query), daemon=True).start()
         return
     if text.startswith("取消監控"):
         query = text[len("取消監控"):].strip()
@@ -303,7 +339,7 @@ def dispatch(user_id: str, text: str, reply_token: str):
             return
         pending_action.pop(user_id, None)
         reply_text(reply_token, "處理中...")
-        threading.Thread(target=handle_unwatch, args=(user_id, query), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_unwatch, user_id, query), daemon=True).start()
         return
     if text.startswith("轉錄"):
         query = text[len("轉錄"):].strip()
@@ -312,26 +348,26 @@ def dispatch(user_id: str, text: str, reply_token: str):
             reply_text(reply_token, "請輸入要轉錄的影片網址或 ID：")
             return
         pending_action.pop(user_id, None)
-        threading.Thread(target=handle_transcribe, args=(user_id, query), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_transcribe, user_id, query), daemon=True).start()
         return
 
     # 不是已知指令：如果使用者前一句是按按鈕／打指令但沒帶參數，這句就當作補上的參數。
     pending = pending_action.pop(user_id, None)
     if pending == "watch":
         reply_text(reply_token, "處理中...")
-        threading.Thread(target=handle_watch, args=(user_id, text), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_watch, user_id, text), daemon=True).start()
         return
     if pending == "unwatch":
         reply_text(reply_token, "處理中...")
-        threading.Thread(target=handle_unwatch, args=(user_id, text), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_unwatch, user_id, text), daemon=True).start()
         return
     if pending == "transcribe":
-        threading.Thread(target=handle_transcribe, args=(user_id, text), daemon=True).start()
+        threading.Thread(target=run_safely, args=(handle_transcribe, user_id, text), daemon=True).start()
         return
 
     # 沒有待處理動作、也不是已知指令：主動判斷這句話是不是頻道名稱/網址。
     reply_text(reply_token, "處理中...")
-    threading.Thread(target=handle_maybe_channel, args=(user_id, text), daemon=True).start()
+    threading.Thread(target=run_safely, args=(handle_maybe_channel, user_id, text), daemon=True).start()
 
 
 @handler.add(MessageEvent, message=TextMessageContent)

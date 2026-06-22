@@ -56,6 +56,7 @@ startCommand: gunicorn --chdir video_text/line_bot --timeout 120 app:app
    - `LINE_CHANNEL_ACCESS_TOKEN`
    - `LINE_CHANNEL_SECRET`
    - `CRON_SECRET`（自訂一個密碼字串，保護 `/check_all` 端點不被任意呼叫）
+   - `REDIS_URL`（監控清單的永久儲存，見下方「監控清單持久化」）
 3. 到 [LINE Developers Console](https://developers.line.biz/) 把 Webhook URL 設成 `https://<你的服務網址>/callback`。
 4. Render 免費方案沒有內建排程服務，改用外部免費排程（例如 [cron-job.org](https://cron-job.org)）定時打：
    ```
@@ -69,7 +70,22 @@ startCommand: gunicorn --chdir video_text/line_bot --timeout 120 app:app
    GET https://<你的服務網址>/
    ```
 
-> ⚠️ Render 免費方案的本機磁碟在重新部署或長時間休眠重啟後可能會被清空，監控清單（`watch_data.json`）因此不保證永久保存。若需要長期保存，建議改存到外部資料庫（例如 Render 自家的免費 PostgreSQL）。
+### 監控清單持久化（REDIS_URL）
+
+Render 免費方案的本機磁碟在重新部署或長時間休眠重啟後會被清空，監控清單如果只存在本機
+`watch_data.json`，每次部署都會不見。解法是接一個外部、免費額度不過期的 [Upstash](https://upstash.com)
+Redis：
+
+1. 到 [upstash.com](https://upstash.com) 免費註冊，建立一個 Redis database（選免費方案）。
+2. 在該 database 的詳細頁面找到連線字串，格式類似：
+   ```
+   rediss://default:<password>@<host>:<port>
+   ```
+3. 到 Render 後台 → Environment 頁籤，新增 `REDIS_URL`，值貼上面那串連線字串，存檔讓它重新部署。
+4. 部署完成後，監控清單就會存在 Upstash，不會再因為 Render 重新部署/休眠重啟而消失。
+
+沒有設定 `REDIS_URL` 時，程式會自動退回用本機 `watch_data.json`（方便本機開發測試），但部署到
+Render 上沒接 Redis 的話，監控清單還是不保證永久保存。
 
 ---
 
