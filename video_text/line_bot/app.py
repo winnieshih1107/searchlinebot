@@ -31,7 +31,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from yt_notes_assistant import (  # noqa: E402
-    is_url, extract_video_id, resolve_video, resolve_channel,
+    is_url, is_channel_url, extract_video_id, resolve_video, resolve_channel,
     list_channel_videos_since, process_video, process_external_url,
 )
 
