@@ -46,6 +46,11 @@ LINE_TEXT_LIMIT = 4500  # LINE 單則訊息上限約 5000 字，留一點緩衝
 # 重新部署或重啟會清空，使用者只需要重新點一次按鈕即可，影響很小）。
 pending_action: dict[str, str] = {}
 
+# 保護 watch_data.json 的讀寫：每個指令都在背景執行緒處理，若連續快速傳多個監控請求，
+# 兩個執行緒可能幾乎同時「讀檔→修改→存檔」，較晚存檔的會用舊資料整批覆蓋掉，
+# 導致前面加入的頻道被蓋掉、清單只剩最後一筆。用鎖把讀寫過程串行化。
+data_lock = threading.Lock()
+
 app = Flask(__name__)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
@@ -127,45 +132,52 @@ def handle_watch(user_id: str, query: str):
         push_text(user_id, f"找不到頻道「{query}」：{e}\n請確認頻道網址或名稱是否正確。")
         return
 
-    data = load_data()
-    record = get_user_record(data, user_id)
-    record["channels"][query] = date.today().isoformat()
-    save_data(data)
+    with data_lock:
+        data = load_data()
+        record = get_user_record(data, user_id)
+        record["channels"][query] = date.today().isoformat()
+        save_data(data)
     push_text(user_id, f"已加入監控：{channel_name}\n（從今天開始算起的新影片才會通知）")
 
 
 def handle_unwatch(user_id: str, query: str):
-    data = load_data()
-    record = get_user_record(data, user_id)
-    if record["channels"].pop(query, None) is not None:
-        save_data(data)
+    with data_lock:
+        data = load_data()
+        record = get_user_record(data, user_id)
+        removed = record["channels"].pop(query, None) is not None
+        if removed:
+            save_data(data)
+    if removed:
         push_text(user_id, f"已取消監控：{query}")
     else:
         push_text(user_id, f"監控清單裡沒有找到：{query}")
 
 
 def handle_list(user_id: str):
-    data = load_data()
-    record = get_user_record(data, user_id)
-    if not record["channels"]:
+    with data_lock:
+        data = load_data()
+        channels = dict(get_user_record(data, user_id)["channels"])
+    if not channels:
         push_text(user_id, "目前沒有監控任何頻道，輸入「監控 <頻道網址或名稱>」開始監控。")
         return
     lines = ["目前監控中的頻道："]
-    for ch, since in record["channels"].items():
+    for ch, since in channels.items():
         lines.append(f"- {ch}（自 {since} 起）")
     push_text(user_id, "\n".join(lines))
 
 
 def handle_check(user_id: str):
-    data = load_data()
-    record = get_user_record(data, user_id)
-    if not record["channels"]:
+    with data_lock:
+        data = load_data()
+        channels_snapshot = dict(get_user_record(data, user_id)["channels"])
+    if not channels_snapshot:
         push_text(user_id, "目前沒有監控任何頻道，輸入「監控 <頻道網址或名稱>」開始監控。")
         return
 
     today = date.today().isoformat()
     any_new = False
-    for channel_query, since_date in list(record["channels"].items()):
+    checked = {}
+    for channel_query, since_date in channels_snapshot.items():
         try:
             channel_name, videos = list_channel_videos_since(channel_query, since_date)
         except Exception as e:
@@ -176,20 +188,30 @@ def handle_check(user_id: str):
             any_new = True
             for v in videos:
                 push_new_video_notice(user_id, channel_name, v)
-        record["channels"][channel_query] = today
+        checked[channel_query] = today
 
-    save_data(data)
+    if checked:
+        with data_lock:
+            data = load_data()
+            get_user_record(data, user_id)["channels"].update(checked)
+            save_data(data)
+
     if not any_new:
         push_text(user_id, "目前監控的頻道都沒有新影片。")
 
 
 def check_all_users():
     """供排程（cron）呼叫：檢查所有使用者監控的頻道，主動推播有新影片的通知（含「產生逐字稿」按鈕）。
-    沒有新影片時不主動打擾使用者。"""
-    data = load_data()
+    沒有新影片時不主動打擾使用者。每個使用者各自查完才上鎖存檔一次，
+    不會因為整個流程很久而一直擋住其他使用者同時操作監控清單。"""
+    with data_lock:
+        data = load_data()
+        snapshot = {uid: dict(rec.get("channels", {})) for uid, rec in data.items()}
+
     today = date.today().isoformat()
-    for user_id, record in data.items():
-        for channel_query, since_date in list(record.get("channels", {}).items()):
+    for user_id, channels in snapshot.items():
+        checked = {}
+        for channel_query, since_date in channels.items():
             try:
                 channel_name, videos = list_channel_videos_since(channel_query, since_date)
             except Exception as e:
@@ -197,8 +219,42 @@ def check_all_users():
                 continue
             for v in videos:
                 push_new_video_notice(user_id, channel_name, v)
-            record["channels"][channel_query] = today
-    save_data(data)
+            checked[channel_query] = today
+
+        if checked:
+            with data_lock:
+                data = load_data()
+                get_user_record(data, user_id)["channels"].update(checked)
+                save_data(data)
+
+
+HELP_TEXT = (
+    "可用指令（也可以直接點下方按鈕）：\n"
+    "監控 <頻道網址或名稱>\n"
+    "取消監控 <頻道網址或名稱>\n"
+    "清單\n"
+    "查詢\n"
+    "轉錄 <影片網址或ID>"
+)
+
+
+def handle_maybe_channel(user_id: str, text: str):
+    """沒比對到任何指令、也沒有待處理動作時，主動判斷這句話是不是頻道網址：
+    是的話直接當成監控請求處理；不是的話顯示可用指令。
+
+    只接受看起來像 YouTube 頻道網址的輸入（is_channel_url），不對純文字做模糊名稱搜尋——
+    實測發現 resolve_channel() 的搜尋備援對任意文字幾乎都「找得到」某個頻道
+    （例如打「謝謝」會配對到完全不相關的頻道），若不限制，幾乎任何聊天訊息都會被
+    誤判成監控請求。"""
+    if not is_channel_url(text):
+        push_text(user_id, HELP_TEXT)
+        return
+    try:
+        resolve_channel(text)
+    except Exception:
+        push_text(user_id, f"「{text}」看起來不是有效的頻道網址。\n\n{HELP_TEXT}")
+        return
+    handle_watch(user_id, text)
 
 
 def handle_transcribe(user_id: str, query: str):
@@ -273,16 +329,9 @@ def dispatch(user_id: str, text: str, reply_token: str):
         threading.Thread(target=handle_transcribe, args=(user_id, text), daemon=True).start()
         return
 
-    reply_text(
-        reply_token,
-        "可用指令（也可以直接點下方按鈕）：\n"
-        "監控 <頻道網址或名稱>\n"
-        "取消監控 <頻道網址或名稱>\n"
-        "清單\n"
-        "查詢\n"
-        "轉錄 <影片網址或ID>",
-        quick_reply=MAIN_MENU_QUICK_REPLY,
-    )
+    # 沒有待處理動作、也不是已知指令：主動判斷這句話是不是頻道名稱/網址。
+    reply_text(reply_token, "處理中...")
+    threading.Thread(target=handle_maybe_channel, args=(user_id, text), daemon=True).start()
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
