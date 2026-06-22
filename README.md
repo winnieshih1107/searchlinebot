@@ -1,5 +1,7 @@
 # YouTube 學習筆記 LINE Bot
 
+![專案海報](poster.png)
+
 一個 LINE 聊天機器人：監控你關注的 YouTube 頻道有沒有新影片，並把影片（或任何 yt-dlp 支援的音訊/影音連結）自動整理成 Markdown 學習筆記，直接回傳到 LINE 對話裡。
 
 **完全不需要任何 LLM API key**，純粹用開源工具拼起來：
