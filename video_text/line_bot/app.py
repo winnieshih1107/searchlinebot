@@ -69,20 +69,33 @@ def get_user_record(data: dict, user_id: str) -> dict:
 
 # ---------- LINE 訊息輔助 ----------
 
-def push_text(user_id: str, text: str):
+# 主選單快速回覆按鈕：點擊等同直接輸入該指令文字，文字輸入仍照常可用，兩者並存。
+MAIN_MENU_QUICK_REPLY = QuickReply(items=[
+    QuickReplyItem(action=MessageAction(label="監控", text="監控")),
+    QuickReplyItem(action=MessageAction(label="取消監控", text="取消監控")),
+    QuickReplyItem(action=MessageAction(label="清單", text="清單")),
+    QuickReplyItem(action=MessageAction(label="查詢", text="查詢")),
+    QuickReplyItem(action=MessageAction(label="轉錄", text="轉錄")),
+])
+
+
+def push_text(user_id: str, text: str, quick_reply: QuickReply | None = MAIN_MENU_QUICK_REPLY):
+    """quick_reply 預設附上主選單按鈕，只會附在最後一段（LINE 慣例：按鈕跟在這輪對話的最後一則訊息上）。"""
+    chunks = [text[i:i + LINE_TEXT_LIMIT] for i in range(0, len(text), LINE_TEXT_LIMIT)] or [""]
     with ApiClient(configuration) as api_client:
         api = MessagingApi(api_client)
-        for i in range(0, len(text), LINE_TEXT_LIMIT):
-            chunk = text[i:i + LINE_TEXT_LIMIT]
-            api.push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=chunk)]))
+        for i, chunk in enumerate(chunks):
+            is_last = i == len(chunks) - 1
+            message = TextMessage(text=chunk, quickReply=quick_reply if is_last else None)
+            api.push_message(PushMessageRequest(to=user_id, messages=[message]))
 
 
-def reply_text(reply_token: str, text: str):
+def reply_text(reply_token: str, text: str, quick_reply: QuickReply | None = None):
     with ApiClient(configuration) as api_client:
         api = MessagingApi(api_client)
         api.reply_message(ReplyMessageRequest(
             replyToken=reply_token,
-            messages=[TextMessage(text=text[:LINE_TEXT_LIMIT])],
+            messages=[TextMessage(text=text[:LINE_TEXT_LIMIT], quickReply=quick_reply)],
         ))
 
 
@@ -230,12 +243,13 @@ def dispatch(user_id: str, text: str, reply_token: str):
     else:
         reply_text(
             reply_token,
-            "可用指令：\n"
+            "可用指令（也可以直接點下方按鈕）：\n"
             "監控 <頻道網址或名稱>\n"
             "取消監控 <頻道網址或名稱>\n"
             "清單\n"
             "查詢\n"
             "轉錄 <影片網址或ID>",
+            quick_reply=MAIN_MENU_QUICK_REPLY,
         )
 
 
