@@ -121,7 +121,10 @@ def resolve_channel(query: str) -> tuple[str, str]:
             if base.endswith(suffix):
                 base = base[: -len(suffix)]
                 break
-        with YoutubeDL(ydl_opts) as ydl:
+        # 這裡只是要確認頻道存在、拿頻道名稱，不需要列出全部影片；
+        # 大型頻道（例如新聞台）可能有上萬支影片，沒限制的話 yt-dlp 會試著整本爬完，
+        # 導致這支指令卡很久甚至像沒回應。
+        with YoutubeDL({**ydl_opts, "playlistend": 1}) as ydl:
             info = ydl.extract_info(base + "/videos", download=False)
         return base, info.get("channel") or info.get("title") or query
 
