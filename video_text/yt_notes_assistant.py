@@ -133,6 +133,13 @@ def resolve_channel(query: str) -> tuple[str, str]:
             info = ydl.extract_info(base + "/videos", download=False)
         return base, info.get("channel") or info.get("title") or query
 
+    # 看起來是網址、但不是影片網址也不是頻道網址（例如搜尋結果頁
+    # youtube.com/results?search_query=...、播放清單網址等）：
+    # 若放行讓下面的 ytsearch5 把整段網址字串當關鍵字模糊搜尋，常常會
+    # 配對到完全不相關的頻道，使用者會在不知情的狀況下監控錯頻道。
+    if is_url(query):
+        raise ValueError(f"不支援的 YouTube 網址格式：{query}\n請改用頻道網址（如 youtube.com/@頻道名）或直接輸入頻道名稱文字。")
+
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch5:{query}", download=False)
         entries = info.get("entries") or []
