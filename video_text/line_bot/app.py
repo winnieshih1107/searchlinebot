@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import threading
+import urllib.parse
 from datetime import date
 
 from flask import Flask, request, abort
@@ -66,6 +67,18 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 
 REDIS_URL = os.environ.get("REDIS_URL")
 
+
+def _normalize_channel_query(q: str) -> str:
+    """『取消監控』比對容錯：使用者貼網址時常見的編碼/大小寫/結尾斜線差異
+    （例如瀏覽器網址列複製出來的是解碼後的中文，但當初輸入監控時是 %xx 編碼形式），
+    直接比對原始字串容易找不到要刪除的項目，導致清單刪不掉。"""
+    try:
+        q = urllib.parse.unquote(q)
+    except Exception:
+        pass
+    return q.strip().rstrip("/").casefold()
+
+
 if REDIS_URL:
     import redis
 
@@ -83,7 +96,14 @@ if REDIS_URL:
         _redis.sadd(_USERS_SET_KEY, user_id)
 
     def remove_watched_channel(user_id: str, channel_query: str) -> bool:
-        return _redis.hdel(_channels_key(user_id), channel_query) > 0
+        key = _channels_key(user_id)
+        if _redis.hdel(key, channel_query) > 0:
+            return True
+        target = _normalize_channel_query(channel_query)
+        for stored_query in _redis.hkeys(key):
+            if _normalize_channel_query(stored_query) == target:
+                return _redis.hdel(key, stored_query) > 0
+        return False
 
     def get_all_watched_channels() -> dict:
         user_ids = _redis.smembers(_USERS_SET_KEY)
@@ -124,10 +144,16 @@ else:
         with _data_lock:
             data = _load_json()
             record = data.setdefault(user_id, {"channels": {}})
-            removed = record["channels"].pop(channel_query, None) is not None
-            if removed:
+            if record["channels"].pop(channel_query, None) is not None:
                 _save_json(data)
-            return removed
+                return True
+            target = _normalize_channel_query(channel_query)
+            for stored_query in list(record["channels"]):
+                if _normalize_channel_query(stored_query) == target:
+                    del record["channels"][stored_query]
+                    _save_json(data)
+                    return True
+            return False
 
     def get_all_watched_channels() -> dict:
         with _data_lock:
