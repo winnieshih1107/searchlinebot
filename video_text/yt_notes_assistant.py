@@ -298,6 +298,19 @@ def list_channel_videos_since(query: str, since_date: str,
                 raise
             continue
 
+        if info is None:
+            # ignoreerrors=True 時，整個分類抓取失敗有時不會丟例外，
+            # 而是讓 extract_info 直接回傳 None（例如頻道沒有這個分類，
+            # 或抓取過程整批失敗）。沒檢查的話 info.get(...) 會直接炸掉
+            # 'NoneType' object has no attribute 'get'。處理方式跟上面
+            # except 區塊一致：videos 分類視為查詢失敗，其他分類當作不存在。
+            if ctype == "videos":
+                raise RuntimeError(
+                    f"抓取「{channel_name}」影片清單時沒有取得任何資料"
+                    "（可能是 YouTube 暫時擋下伺服器 IP），請稍後再查詢一次。"
+                )
+            continue
+
         entries = info.get("entries") or []
         if ctype == "videos" and not entries:
             # 能監控到這個頻道，代表加入監控時 resolve_channel 已經確認過
