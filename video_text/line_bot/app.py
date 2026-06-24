@@ -276,25 +276,38 @@ def handle_check(user_id: str):
         return
 
     today = date.today().isoformat()
-    any_new = []  # list.append 在 GIL 下是原子操作，多執行緒同時呼叫不需要額外上鎖
+    # channel_query -> 這個頻道的查詢結果文字；dict 對不同 key 的 __setitem__
+    # 在 GIL 下是安全的，多執行緒同時寫不同 key 不需要額外上鎖。每個頻道無論
+    # 成功/失敗/沒有新內容都一定會寫一筆，最後統一回報，不要再讓使用者自己
+    # 對照「清單」日期去猜某個頻道到底有沒有真的查過。
+    results: dict[str, str] = {}
 
     def check_one(channel_query, since_date):
         try:
             channel_name, videos = list_channel_videos_since(channel_query, since_date)
         except Exception as e:
-            push_text(user_id, f"查詢「{channel_query}」失敗：{e}")
+            results[channel_query] = f"{channel_query}：查詢失敗 - {e}"
             return
-        if videos:
-            any_new.append(channel_query)
+        try:
             for v in videos:
                 push_new_video_notice(user_id, channel_name, v)
-        add_watched_channel(user_id, channel_query, today)
+            add_watched_channel(user_id, channel_query, today)
+        except Exception as e:
+            results[channel_query] = f"{channel_query}：找到 {len(videos)} 支但通知/更新時發生錯誤 - {e}"
+            return
+        if videos:
+            results[channel_query] = f"{channel_query}：找到 {len(videos)} 支新內容，已通知"
+        else:
+            results[channel_query] = f"{channel_query}：沒有新內容"
 
     with ThreadPoolExecutor(max_workers=CHECK_CONCURRENCY) as pool:
         list(pool.map(lambda item: check_one(*item), channels_snapshot.items()))
 
-    if not any_new:
-        push_text(user_id, "目前監控的頻道都沒有新影片。")
+    summary = "\n".join(
+        results.get(cq, f"{cq}：沒有收到查詢結果（執行中可能發生未預期錯誤）")
+        for cq in channels_snapshot
+    )
+    push_text(user_id, f"查詢結果：\n{summary}")
 
 
 def check_all_users():
@@ -308,9 +321,12 @@ def check_all_users():
         except Exception as e:
             print(f"查詢「{channel_query}」失敗：{e}", file=sys.stderr)
             return
-        for v in videos:
-            push_new_video_notice(user_id, channel_name, v)
-        add_watched_channel(user_id, channel_query, today)
+        try:
+            for v in videos:
+                push_new_video_notice(user_id, channel_name, v)
+            add_watched_channel(user_id, channel_query, today)
+        except Exception as e:
+            print(f"「{channel_query}」找到 {len(videos)} 支但通知/更新時發生錯誤：{e}", file=sys.stderr)
 
     jobs = [
         (user_id, channel_query, since_date)
