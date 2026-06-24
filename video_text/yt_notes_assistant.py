@@ -38,6 +38,40 @@ PREFERRED_LANGS = ["zh-Hant", "zh-TW", "zh-Hans", "zh", "en"]
 # 的 yt-dlp 呼叫都套用這個逾時/重試上限，讓它頂多卡這麼久就會失敗回報，而不是卡死。
 YDL_NETWORK_OPTS = {"socket_timeout": 15, "retries": 3, "extractor_retries": 1}
 
+# YouTube 暫時擋下雲端機房 IP 時典型的錯誤訊息關鍵字（機器人驗證／限流），
+# 用來跟「會員專屬內容」「私人影片」之類正常、預期內、跟新影片無關的單支
+# 影片抓取失敗區分開——後者不該觸發查詢失敗，否則每次查詢都會被會員制
+# 頻道的雜訊嚇得誤報失敗。
+_BLOCKED_ERROR_MARKERS = (
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "429",
+    "too many requests",
+    "http error 403",
+)
+
+
+class _SuspiciousErrorLogger:
+    """傳給 YoutubeDL 的 logger，只記錄看起來像「伺服器被擋」的錯誤訊息
+    （ignoreerrors=True 時，這些錯誤原本會被悄悄吞掉、完全沒有痕跡）。"""
+
+    def __init__(self):
+        self.suspicious: list[str] = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        low = str(msg).lower()
+        if any(marker in low for marker in _BLOCKED_ERROR_MARKERS):
+            self.suspicious.append(str(msg))
+
 STOPWORDS = set("""
 的 了 是 在 我 你 他 她 它 們 這 那 也 都 就 和 與 或 但 而 又 並
 之 於 對 為 等 並且 因為 所以 如果 雖然 然後 還是 可以 可能 一個
@@ -217,6 +251,7 @@ def list_channel_videos_since(query: str, since_date: str,
     videos = []
     seen_ids = set()
     for ctype in content_types:
+        error_logger = _SuspiciousErrorLogger()
         ydl_opts = {
             "quiet": True,
             "skip_download": True,
@@ -224,6 +259,7 @@ def list_channel_videos_since(query: str, since_date: str,
             "extract_flat": False,  # 需要完整 metadata 才有 upload_date
             "ignoreerrors": True,   # Premiere/直播等特殊影片抓取失敗時繼續處理
             "playlistend": 50,
+            "logger": error_logger,
             **YDL_NETWORK_OPTS,
         }
         try:
@@ -248,6 +284,7 @@ def list_channel_videos_since(query: str, since_date: str,
                 "（可能是 YouTube 暫時擋下伺服器 IP），請稍後再查詢一次。"
             )
 
+        videos_before = len(videos)
         for entry in entries:
             if not entry or not entry.get("id") or entry["id"] in seen_ids:
                 continue
@@ -265,6 +302,16 @@ def list_channel_videos_since(query: str, since_date: str,
                 "type": CONTENT_TYPE_LABELS.get(ctype, ctype),
                 "upload_date": upload_date,
             })
+
+        if ctype == "videos" and len(videos) == videos_before and error_logger.suspicious:
+            # 這個分類沒有任何影片通過 since_date 篩選，但同時有一支以上的影片
+            # 抓取失敗，錯誤訊息看起來像伺服器被 YouTube 擋下（而不是會員專屬
+            # /私人影片之類正常會失敗的情況）。無法排除失敗的那幾支裡有真正
+            # 的新影片，不能放行回報「沒有新影片」。
+            raise RuntimeError(
+                f"抓取「{channel_name}」時有 {len(error_logger.suspicious)} 支影片資料抓取失敗"
+                "（看起來是 YouTube 暫時擋下伺服器 IP），無法確定是否有新影片，請稍後再查詢一次。"
+            )
     return channel_name, videos
 
 
