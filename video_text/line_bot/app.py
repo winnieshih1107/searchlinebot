@@ -20,6 +20,7 @@ import re
 import sys
 import threading
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from flask import Flask, request, abort
@@ -42,6 +43,12 @@ LINE_CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 CRON_SECRET = os.environ.get("CRON_SECRET")  # 用來保護 /check_all，避免外部任意呼叫
 
 LINE_TEXT_LIMIT = 4500  # LINE 單則訊息上限約 5000 字，留一點緩衝
+
+# 每個頻道查新影片都要抓多支影片的完整 metadata，單一頻道常要花 40-180 秒。
+# 監控好幾個頻道時如果照順序一個查完才查下一個，使用者可能要等好幾十分鐘才
+# 收到任何回覆。改成同時平行查，但限制同時數量，避免短時間內對 YouTube
+# 發出太多請求，反而更容易被判定成可疑流量。
+CHECK_CONCURRENCY = 4
 
 # 等待使用者回答頻道網址/名稱的對話狀態：user_id -> "watch" | "unwatch" | "transcribe"。
 # 只存在記憶體裡（Render 免費方案是單一 worker，不會有多個 process 互相看不到的問題；
@@ -269,19 +276,22 @@ def handle_check(user_id: str):
         return
 
     today = date.today().isoformat()
-    any_new = False
-    for channel_query, since_date in channels_snapshot.items():
+    any_new = []  # list.append 在 GIL 下是原子操作，多執行緒同時呼叫不需要額外上鎖
+
+    def check_one(channel_query, since_date):
         try:
             channel_name, videos = list_channel_videos_since(channel_query, since_date)
         except Exception as e:
             push_text(user_id, f"查詢「{channel_query}」失敗：{e}")
-            continue
-
+            return
         if videos:
-            any_new = True
+            any_new.append(channel_query)
             for v in videos:
                 push_new_video_notice(user_id, channel_name, v)
         add_watched_channel(user_id, channel_query, today)
+
+    with ThreadPoolExecutor(max_workers=CHECK_CONCURRENCY) as pool:
+        list(pool.map(lambda item: check_one(*item), channels_snapshot.items()))
 
     if not any_new:
         push_text(user_id, "目前監控的頻道都沒有新影片。")
@@ -291,16 +301,24 @@ def check_all_users():
     """供排程（cron）呼叫：檢查所有使用者監控的頻道，主動推播有新影片的通知（含「產生逐字稿」按鈕）。
     沒有新影片時不主動打擾使用者。"""
     today = date.today().isoformat()
-    for user_id, channels in get_all_watched_channels().items():
-        for channel_query, since_date in channels.items():
-            try:
-                channel_name, videos = list_channel_videos_since(channel_query, since_date)
-            except Exception as e:
-                print(f"查詢「{channel_query}」失敗：{e}", file=sys.stderr)
-                continue
-            for v in videos:
-                push_new_video_notice(user_id, channel_name, v)
-            add_watched_channel(user_id, channel_query, today)
+
+    def check_one(user_id, channel_query, since_date):
+        try:
+            channel_name, videos = list_channel_videos_since(channel_query, since_date)
+        except Exception as e:
+            print(f"查詢「{channel_query}」失敗：{e}", file=sys.stderr)
+            return
+        for v in videos:
+            push_new_video_notice(user_id, channel_name, v)
+        add_watched_channel(user_id, channel_query, today)
+
+    jobs = [
+        (user_id, channel_query, since_date)
+        for user_id, channels in get_all_watched_channels().items()
+        for channel_query, since_date in channels.items()
+    ]
+    with ThreadPoolExecutor(max_workers=CHECK_CONCURRENCY) as pool:
+        list(pool.map(lambda job: check_one(*job), jobs))
 
 
 HELP_TEXT = (
