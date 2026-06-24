@@ -20,7 +20,7 @@ import re
 import sys
 import threading
 import urllib.parse
-from datetime import date
+from datetime import date, timedelta
 
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
@@ -372,7 +372,15 @@ def dispatch(user_id: str, text: str, reply_token: str):
         query = text[len("監控"):].strip()
         if not query:
             pending_action[user_id] = "watch"
-            reply_text(reply_token, "請輸入要監控的頻道網址或名稱：")
+            today_str = date.today().isoformat()
+            example_str = (date.today() - timedelta(days=7)).isoformat()
+            reply_text(
+                reply_token,
+                "請輸入要監控的頻道網址或名稱：\n"
+                f"（預設從今天 {today_str} 起算新影片；"
+                "如果要從更早的日期開始算，可以在後面加上日期，例如：\n"
+                f"頻道網址或名稱 {example_str}）",
+            )
             return
         pending_action.pop(user_id, None)
         reply_text(reply_token, "處理中...")
