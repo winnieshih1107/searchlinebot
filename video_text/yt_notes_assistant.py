@@ -67,8 +67,24 @@ if _COOKIEFILE:
 
 def _cookie_status_note() -> str:
     """讓「查詢失敗」的錯誤訊息直接帶出 cookies 是否生效，不必另外看 Render log
-    才能判斷是「沒設定 cookies」還是「設定了但還是被擋」。"""
-    return f"cookies：{'已套用 ' + _COOKIEFILE if _COOKIEFILE else '未設定'}"
+    才能判斷是「沒設定 cookies」「設定了但內容是壞的」還是「內容沒問題但還是被擋」。
+    環境變數貼進 Render 時換行很容易被吃掉、整份內容黏成一行，這種壞掉的
+    cookies.txt yt-dlp 解析不出任何一筆 cookie，效果等同完全沒帶 cookies，
+    但原本的訊息只會顯示「已套用」，看不出內容其實是空的——所以這裡額外
+    算一下檔案行數跟看起來像合法 cookie 列（Netscape 格式是 tab 分隔 7 欄）
+    的筆數，壞掉的話從訊息就能直接看出來。"""
+    if not _COOKIEFILE:
+        return "cookies：未設定"
+    try:
+        with open(_COOKIEFILE, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        cookie_lines = [
+            line for line in lines
+            if line.strip() and not line.startswith("#") and len(line.rstrip("\n").split("\t")) == 7
+        ]
+        return f"cookies：已套用 {_COOKIEFILE}（檔案共 {len(lines)} 行，看起來像合法 cookie 的有 {len(cookie_lines)} 行）"
+    except Exception as e:
+        return f"cookies：已設定但讀取失敗 - {e}"
 
 # YouTube 暫時擋下雲端機房 IP 時典型的錯誤訊息關鍵字（機器人驗證／限流），
 # 用來跟「會員專屬內容」「私人影片」之類正常、預期內、跟新影片無關的單支
