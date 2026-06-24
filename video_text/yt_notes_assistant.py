@@ -226,7 +226,7 @@ def resolve_channel(query: str) -> tuple[str, str]:
 
 
 def list_channel_videos(query: str, max_videos: int | None = None,
-                         content_types: tuple[str, ...] = ("videos", "shorts")) -> tuple[str, list[dict]]:
+                         content_types: tuple[str, ...] = ("videos", "streams")) -> tuple[str, list[dict]]:
     """回傳 (頻道名稱, 影片列表)，每個影片是 {id, title, url, type}。
     content_types 可包含 "videos"（一般影片）、"shorts"、"streams"（直播）。
     max_videos=None 表示每個分類都列出全部。"""
@@ -264,7 +264,7 @@ def list_channel_videos(query: str, max_videos: int | None = None,
 
 
 def list_channel_videos_since(query: str, since_date: str,
-                              content_types: tuple[str, ...] = ("videos", "shorts")) -> tuple[str, list[dict]]:
+                              content_types: tuple[str, ...] = ("videos", "streams")) -> tuple[str, list[dict]]:
     """回傳 since_date（含）之後發布的影片，每個影片附帶 upload_date 欄位。
     since_date 格式：YYYY-MM-DD。
     注意：yt-dlp dateafter 在 extract_info 模式下不過濾 entries，
