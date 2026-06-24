@@ -182,7 +182,13 @@ def list_channel_videos(query: str, max_videos: int | None = None,
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"{channel_base_url}/{ctype}", download=False)
         except Exception:
-            continue  # 該頻道沒有這個分類（例如沒有直播）
+            # "videos" 分類每個頻道都有，抓取失敗代表查詢本身出問題
+            # （例如雲端機房 IP 被 YouTube 擋下），不能當成「沒有這個分類」吞掉，
+            # 否則使用者會誤以為頻道沒有新影片。其他分類（shorts/streams）
+            # 頻道可能真的沒有，才繼續往下處理其他分類。
+            if ctype == "videos":
+                raise
+            continue
 
         for entry in info.get("entries") or []:
             if not entry or not entry.get("id") or entry["id"] in seen_ids:
@@ -224,6 +230,10 @@ def list_channel_videos_since(query: str, since_date: str,
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"{channel_base_url}/{ctype}", download=False)
         except Exception:
+            # 同 list_channel_videos()：videos 分類抓取失敗要往外丟，
+            # 否則查詢失敗會被誤判成「沒有新影片」。
+            if ctype == "videos":
+                raise
             continue
 
         for entry in (info.get("entries") or []):
