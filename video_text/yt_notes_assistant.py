@@ -236,7 +236,19 @@ def list_channel_videos_since(query: str, since_date: str,
                 raise
             continue
 
-        for entry in (info.get("entries") or []):
+        entries = info.get("entries") or []
+        if ctype == "videos" and not entries:
+            # 能監控到這個頻道，代表加入監控時 resolve_channel 已經確認過
+            # 至少有 1 支影片；extract_flat=False 搭配 ignoreerrors=True 時，
+            # 每支影片的完整 metadata 抓取若失敗（例如雲端機房 IP 被 YouTube
+            # 暫時擋下）會被悄悄跳過、不留下任何痕跡，導致整批結果變成空清單。
+            # 這種情況不能當成「真的沒有新影片」，要往外丟成查詢失敗。
+            raise RuntimeError(
+                f"抓取「{channel_name}」影片清單時沒有任何一支影片成功取得資料"
+                "（可能是 YouTube 暫時擋下伺服器 IP），請稍後再查詢一次。"
+            )
+
+        for entry in entries:
             if not entry or not entry.get("id") or entry["id"] in seen_ids:
                 continue
             seen_ids.add(entry["id"])
