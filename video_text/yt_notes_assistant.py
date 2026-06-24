@@ -36,6 +36,13 @@ PREFERRED_LANGS = ["zh-Hant", "zh-TW", "zh-Hans", "zh", "en"]
 # YouTube 對雲端機房（Render 之類）的 IP 常常會比一般家用網路慢、或需要重試更多次，
 # 沒有限制的話某些頻道/網路狀況會卡到好幾分鐰看起來像沒回應。所有「只是查 metadata」
 # 的 yt-dlp 呼叫都套用這個逾時/重試上限，讓它頂多卡這麼久就會失敗回報，而不是卡死。
+#
+# 曾經試過在這裡加 extractor_args 把 player_client 換成 "tv"，想繞開
+# "Sign in to confirm you're not a bot"，但本機實測「tv」用戶端會讓大量
+# 正常影片被誤判成「This video is DRM protected」，導致每一筆都被
+# ignoreerrors 悄悄丟掉、查詢結果整批變成 0——比原本被擋的狀況更糟，
+# 已經revert。不要再用 "tv" client，要嘗試其他 player_client 前，先用
+# 上面的失敗紀錄當教訓，本機驗證過沒有造成新的「entries 全部消失」才能上線。
 YDL_NETWORK_OPTS = {"socket_timeout": 15, "retries": 3, "extractor_retries": 1}
 
 
