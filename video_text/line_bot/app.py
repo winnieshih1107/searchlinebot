@@ -16,6 +16,7 @@ LINE 指令：
 
 import json
 import os
+import re
 import sys
 import threading
 import urllib.parse
@@ -209,15 +210,35 @@ def push_new_video_notice(user_id: str, channel_name: str, video: dict):
 
 # ---------- 指令處理（耗時工作丟到背景執行緒，用 push 回覆）----------
 
+# 「監控 <頻道> <YYYY-MM-DD>」結尾可選帶一個起始日期，蓋掉預設的「今天」。
+# 主要用途：重新監控已在清單裡的頻道、把 since_date 往回調，找回因為
+# 之前查詢靜默失敗（或單純太久沒查）而被跳過的舊影片。
+WATCH_DATE_SUFFIX_RE = re.compile(r"^(.*\S)\s+(\d{4}-\d{2}-\d{2})$")
+
+
+def _split_watch_query(text: str) -> tuple[str, str]:
+    """回傳 (channel_query, since_date)；沒帶日期或日期格式不合法則 since_date 為今天。"""
+    m = WATCH_DATE_SUFFIX_RE.match(text.strip())
+    if not m:
+        return text.strip(), date.today().isoformat()
+    channel_part, date_part = m.group(1), m.group(2)
+    try:
+        date.fromisoformat(date_part)
+    except ValueError:
+        return text.strip(), date.today().isoformat()
+    return channel_part, date_part
+
+
 def handle_watch(user_id: str, query: str):
+    query, since_date = _split_watch_query(query)
     try:
         _, channel_name = resolve_channel(query)
     except Exception as e:
         push_text(user_id, f"找不到頻道「{query}」：{e}\n請確認頻道網址或名稱是否正確。")
         return
 
-    add_watched_channel(user_id, query, date.today().isoformat())
-    push_text(user_id, f"已加入監控：{channel_name}\n（從今天開始算起的新影片才會通知）")
+    add_watched_channel(user_id, query, since_date)
+    push_text(user_id, f"已加入監控：{channel_name}\n（自 {since_date} 起的新影片才會通知）")
 
 
 def handle_unwatch(user_id: str, query: str):
@@ -281,7 +302,7 @@ def check_all_users():
 
 HELP_TEXT = (
     "可用指令（也可以直接點下方按鈕）：\n"
-    "監控 <頻道網址或名稱>\n"
+    "監控 <頻道網址或名稱> [起始日期 YYYY-MM-DD]\n"
     "取消監控 <頻道網址或名稱>\n"
     "清單\n"
     "查詢\n"
