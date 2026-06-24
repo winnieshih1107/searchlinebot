@@ -210,23 +210,26 @@ def push_new_video_notice(user_id: str, channel_name: str, video: dict):
 
 # ---------- 指令處理（耗時工作丟到背景執行緒，用 push 回覆）----------
 
-# 「監控 <頻道> <YYYY-MM-DD>」結尾可選帶一個起始日期，蓋掉預設的「今天」。
+# 「監控 <頻道> <日期>」結尾可選帶一個起始日期，蓋掉預設的「今天」。
 # 主要用途：重新監控已在清單裡的頻道、把 since_date 往回調，找回因為
 # 之前查詢靜默失敗（或單純太久沒查）而被跳過的舊影片。
-WATCH_DATE_SUFFIX_RE = re.compile(r"^(.*\S)\s+(\d{4}-\d{2}-\d{2})$")
+# 月/日不要求補零（"2026-6-17" 跟 "2026-06-17" 都接受），避免格式稍有
+# 差異就被整個誤判成頻道名稱的一部分，導致 yt-dlp 拿一個帶日期的爛網址去查。
+WATCH_DATE_SUFFIX_RE = re.compile(r"^(.*\S)\s+(\d{4})-(\d{1,2})-(\d{1,2})$")
 
 
 def _split_watch_query(text: str) -> tuple[str, str]:
-    """回傳 (channel_query, since_date)；沒帶日期或日期格式不合法則 since_date 為今天。"""
-    m = WATCH_DATE_SUFFIX_RE.match(text.strip())
+    """回傳 (channel_query, since_date)；沒帶日期或日期不是合法的日子則 since_date 為今天。"""
+    text = text.strip()
+    m = WATCH_DATE_SUFFIX_RE.match(text)
     if not m:
-        return text.strip(), date.today().isoformat()
-    channel_part, date_part = m.group(1), m.group(2)
+        return text, date.today().isoformat()
+    channel_part, year, month, day = m.group(1), m.group(2), m.group(3), m.group(4)
     try:
-        date.fromisoformat(date_part)
+        parsed = date(int(year), int(month), int(day))
     except ValueError:
-        return text.strip(), date.today().isoformat()
-    return channel_part, date_part
+        return text, date.today().isoformat()
+    return channel_part, parsed.isoformat()
 
 
 def handle_watch(user_id: str, query: str):
