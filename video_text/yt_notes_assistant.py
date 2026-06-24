@@ -64,6 +64,12 @@ _COOKIEFILE = _resolve_cookiefile()
 if _COOKIEFILE:
     YDL_NETWORK_OPTS["cookiefile"] = _COOKIEFILE
 
+
+def _cookie_status_note() -> str:
+    """讓「查詢失敗」的錯誤訊息直接帶出 cookies 是否生效，不必另外看 Render log
+    才能判斷是「沒設定 cookies」還是「設定了但還是被擋」。"""
+    return f"cookies：{'已套用 ' + _COOKIEFILE if _COOKIEFILE else '未設定'}"
+
 # YouTube 暫時擋下雲端機房 IP 時典型的錯誤訊息關鍵字（機器人驗證／限流），
 # 用來跟「會員專屬內容」「私人影片」之類正常、預期內、跟新影片無關的單支
 # 影片抓取失敗區分開——後者不該觸發查詢失敗，否則每次查詢都會被會員制
@@ -307,7 +313,7 @@ def list_channel_videos_since(query: str, since_date: str,
             if ctype == "videos":
                 raise RuntimeError(
                     f"抓取「{channel_name}」影片清單時沒有取得任何資料"
-                    "（可能是 YouTube 暫時擋下伺服器 IP），請稍後再查詢一次。"
+                    f"（可能是 YouTube 暫時擋下伺服器 IP），請稍後再查詢一次。[{_cookie_status_note()}]"
                 )
             continue
 
@@ -320,7 +326,7 @@ def list_channel_videos_since(query: str, since_date: str,
             # 這種情況不能當成「真的沒有新影片」，要往外丟成查詢失敗。
             raise RuntimeError(
                 f"抓取「{channel_name}」影片清單時沒有任何一支影片成功取得資料"
-                "（可能是 YouTube 暫時擋下伺服器 IP），請稍後再查詢一次。"
+                f"（可能是 YouTube 暫時擋下伺服器 IP），請稍後再查詢一次。[{_cookie_status_note()}]"
             )
 
         videos_before = len(videos)
@@ -350,6 +356,7 @@ def list_channel_videos_since(query: str, since_date: str,
             raise RuntimeError(
                 f"抓取「{channel_name}」時有 {len(error_logger.suspicious)} 支影片資料抓取失敗"
                 "（看起來是 YouTube 暫時擋下伺服器 IP），無法確定是否有新影片，請稍後再查詢一次。"
+                f"[{_cookie_status_note()}；錯誤範例：{error_logger.suspicious[0][:200]}]"
             )
     return channel_name, videos
 
