@@ -38,6 +38,32 @@ PREFERRED_LANGS = ["zh-Hant", "zh-TW", "zh-Hans", "zh", "en"]
 # 的 yt-dlp 呼叫都套用這個逾時/重試上限，讓它頂多卡這麼久就會失敗回報，而不是卡死。
 YDL_NETWORK_OPTS = {"socket_timeout": 15, "retries": 3, "extractor_retries": 1}
 
+
+def _resolve_cookiefile() -> str | None:
+    """雲端機房 IP 常被 YouTube 判定為機器人而擋下metadata 請求（"Sign in to
+    confirm you're not a bot" / 429）；帶上登入過的 YouTube 帳號 cookies 可以
+    大幅降低被擋的機率。優先找 Render「Secret Files」掛載出來的真實檔案路徑
+    （多行檔案內容用 Secret File 比塞進環境變數穩，不必擔心換行被吃掉）；
+    找不到才退而讀 YT_COOKIES 環境變數（本機開發或其他平台用，內容就是
+    cookies.txt 整份文字，容許用 "\\n" 表示換行）。兩者都沒有就不帶 cookies，
+    沿用原本「匿名遊客」的請求方式。"""
+    secret_path = os.environ.get("YT_COOKIES_FILE", "/etc/secrets/cookies.txt")
+    if os.path.isfile(secret_path):
+        return secret_path
+
+    raw = os.environ.get("YT_COOKIES")
+    if not raw:
+        return None
+    path = os.path.join(_TMP_DIR, "cookies.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(raw.replace("\\n", "\n"))
+    return path
+
+
+_COOKIEFILE = _resolve_cookiefile()
+if _COOKIEFILE:
+    YDL_NETWORK_OPTS["cookiefile"] = _COOKIEFILE
+
 # YouTube 暫時擋下雲端機房 IP 時典型的錯誤訊息關鍵字（機器人驗證／限流），
 # 用來跟「會員專屬內容」「私人影片」之類正常、預期內、跟新影片無關的單支
 # 影片抓取失敗區分開——後者不該觸發查詢失敗，否則每次查詢都會被會員制

@@ -69,8 +69,33 @@ startCommand: gunicorn --chdir video_text/line_bot --timeout 120 app:app
    - `LINE_CHANNEL_SECRET`
    - `CRON_SECRET`（自訂一個密碼字串，保護 `/check_all` 端點不被任意呼叫）
    - `REDIS_URL`（監控清單的永久儲存，見下方「監控清單持久化」）
+   - `YT_COOKIES` 或 Secret File（避免 Render 伺服器 IP 被 YouTube 擋下，見下方「YouTube Cookies」，強烈建議設定）
 3. 到 [LINE Developers Console](https://developers.line.biz/) 把 Webhook URL 設成 `https://<你的服務網址>/callback`。
 4. 設定 Cronjobs（見下方「Cronjobs 設定」）跟監控清單持久化（見下方「監控清單持久化」）。
+
+### YouTube Cookies（避免伺服器 IP 被擋，強烈建議設定）
+
+Render 這類雲端機房的出口 IP 常被 YouTube 判定為可疑流量／機器人，導致 yt-dlp 抓取頻道影片清單
+時整批失敗（查詢時會出現「看起來是 YouTube 暫時擋下伺服器 IP」的錯誤）。帶上一個已登入
+YouTube 帳號的 cookies，能讓請求看起來像正常使用者在瀏覽器操作，大幅降低被擋的機率。
+
+**1. 匯出 cookies.txt**：在電腦瀏覽器登入你的 Google/YouTube 帳號，安裝一個能匯出 cookies 的擴充
+套件（例如 Chrome 的「Get cookies.txt LOCALLY」），到 youtube.com 頁面匯出成 Netscape 格式的
+`cookies.txt` 檔案。**這份檔案等同於你帳號的登入憑證，不要提交進 git、不要分享給別人**，只給自己
+的 Render 服務用。
+
+**2. 設定到 Render**（兩種方式選一種）：
+
+- **Secret Files（推薦）**：Render 後台 → 你的 service → **Environment** 頁籤 → **Secret Files** →
+  新增一個檔案，路徑填 `/etc/secrets/cookies.txt`，內容貼上 `cookies.txt` 的完整內容。這種方式是
+  真的掛載成檔案，不必擔心多行內容在環境變數欄位裡換行跑掉。
+- **環境變數 `YT_COOKIES`**：如果想用環境變數，新增 `YT_COOKIES`，值貼上 `cookies.txt` 的完整內容
+  （多行貼上即可，程式也接受把換行寫成 `\n` 的單行版本）。
+
+兩者都沒設定時，程式會自動退回不帶 cookies（跟原本一樣的匿名請求方式），不影響本機開發。
+
+cookies 有效期有限（通常數週到數月，依帳號設定），如果之後又開始查詢失敗、錯誤訊息又出現
+「看起來是 YouTube 暫時擋下伺服器 IP」，可以重新匯出一份最新的 cookies.txt 換上去。
 
 ### 監控清單持久化（REDIS_URL）
 
