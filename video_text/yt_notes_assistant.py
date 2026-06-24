@@ -39,6 +39,18 @@ PREFERRED_LANGS = ["zh-Hant", "zh-TW", "zh-Hans", "zh", "en"]
 YDL_NETWORK_OPTS = {"socket_timeout": 15, "retries": 3, "extractor_retries": 1}
 
 
+_SECRET_COOKIE_PATH = os.environ.get("YT_COOKIES_FILE", "/etc/secrets/cookies.txt")
+
+# yt-dlp 需要看到這些 youtube.com 的登入態 cookie 才會把請求當成「已登入的
+# 真人瀏覽器」；如果匯出時其實沒有登入、或擴充套件只存了非關鍵 cookie，
+# 檔案格式可能完全正常（行數、tab 分隔都對），但裡面根本沒有任何一個這種
+# 關鍵 cookie，一樣會被當成匿名流量擋下。
+_KEY_AUTH_COOKIE_NAMES = {
+    "SID", "HSID", "SSID", "APISID", "SAPISID",
+    "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO",
+}
+
+
 def _resolve_cookiefile() -> str | None:
     """雲端機房 IP 常被 YouTube 判定為機器人而擋下metadata 請求（"Sign in to
     confirm you're not a bot" / 429）；帶上登入過的 YouTube 帳號 cookies 可以
@@ -47,9 +59,8 @@ def _resolve_cookiefile() -> str | None:
     找不到才退而讀 YT_COOKIES 環境變數（本機開發或其他平台用，內容就是
     cookies.txt 整份文字，容許用 "\\n" 表示換行）。兩者都沒有就不帶 cookies，
     沿用原本「匿名遊客」的請求方式。"""
-    secret_path = os.environ.get("YT_COOKIES_FILE", "/etc/secrets/cookies.txt")
-    if os.path.isfile(secret_path):
-        return secret_path
+    if os.path.isfile(_SECRET_COOKIE_PATH):
+        return _SECRET_COOKIE_PATH
 
     raw = os.environ.get("YT_COOKIES")
     if not raw:
@@ -67,24 +78,33 @@ if _COOKIEFILE:
 
 def _cookie_status_note() -> str:
     """讓「查詢失敗」的錯誤訊息直接帶出 cookies 是否生效，不必另外看 Render log
-    才能判斷是「沒設定 cookies」「設定了但內容是壞的」還是「內容沒問題但還是被擋」。
-    環境變數貼進 Render 時換行很容易被吃掉、整份內容黏成一行，這種壞掉的
-    cookies.txt yt-dlp 解析不出任何一筆 cookie，效果等同完全沒帶 cookies，
-    但原本的訊息只會顯示「已套用」，看不出內容其實是空的——所以這裡額外
-    算一下檔案行數跟看起來像合法 cookie 列（Netscape 格式是 tab 分隔 7 欄）
-    的筆數，壞掉的話從訊息就能直接看出來。"""
+    就能判斷卡在哪一層：沒設定 / 走了哪個來源（Secret File 還是環境變數）/
+    檔案格式有沒有壞掉 / 裡面到底有沒有真正能代表「已登入」的關鍵 cookie。
+    光看「已套用」看不出這些，行數、格式正常也可能完全沒有登入態 cookie。"""
+    used_secret_file = bool(_COOKIEFILE) and _COOKIEFILE == _SECRET_COOKIE_PATH
+    source_note = (
+        f"找過 Secret File（{_SECRET_COOKIE_PATH}）："
+        f"{'存在，使用這份' if used_secret_file else '不存在，退回 YT_COOKIES 環境變數'}"
+    )
     if not _COOKIEFILE:
-        return "cookies：未設定"
+        return f"cookies：未設定（{source_note}；YT_COOKIES 環境變數也沒有）"
     try:
         with open(_COOKIEFILE, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
-        cookie_lines = [
-            line for line in lines
+        cookie_rows = [
+            line.rstrip("\n").split("\t") for line in lines
             if line.strip() and not line.startswith("#") and len(line.rstrip("\n").split("\t")) == 7
         ]
-        return f"cookies：已套用 {_COOKIEFILE}（檔案共 {len(lines)} 行，看起來像合法 cookie 的有 {len(cookie_lines)} 行）"
+        youtube_rows = [row for row in cookie_rows if "youtube.com" in row[0] or "google.com" in row[0]]
+        found_auth_names = sorted({row[5] for row in cookie_rows if row[5] in _KEY_AUTH_COOKIE_NAMES})
+        return (
+            f"cookies：已套用 {_COOKIEFILE}（{source_note}；"
+            f"檔案共 {len(lines)} 行，合法格式 {len(cookie_rows)} 行，"
+            f"屬於 youtube/google 網域 {len(youtube_rows)} 行，"
+            f"關鍵登入 cookie：{'、'.join(found_auth_names) if found_auth_names else '一個都沒找到'}）"
+        )
     except Exception as e:
-        return f"cookies：已設定但讀取失敗 - {e}"
+        return f"cookies：已設定但讀取失敗 - {e}（{source_note}）"
 
 # YouTube 暫時擋下雲端機房 IP 時典型的錯誤訊息關鍵字（機器人驗證／限流），
 # 用來跟「會員專屬內容」「私人影片」之類正常、預期內、跟新影片無關的單支
